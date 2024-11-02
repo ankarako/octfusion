@@ -137,7 +137,11 @@ def run_mesh2sdf():
         if os.path.exists(filename_obj): continue
 
         # load the raw mesh
-        mesh = trimesh.load(filename_raw, force='mesh')
+        try:
+            mesh = trimesh.load(filename_raw, force='mesh')
+        except:
+            print(f"Could not load: {filename_raw}")
+            continue
 
         # rescale mesh to [-1, 1] for mesh2sdf, note the factor **mesh_scale**
         vertices = mesh.vertices
@@ -248,7 +252,13 @@ def sample_pts_from_mesh():
         if os.path.exists(filename_pts): continue
 
         # sample points
-        mesh = trimesh.load(filename_obj, force='mesh')
+        try:
+            mesh = trimesh.load(filename_obj, force='mesh')
+        except:
+            print(f"Failed to load: {filename_obj}")
+            continue
+        if mesh.body_count == 0:
+            continue
         points, idx = trimesh.sample.sample_surface(mesh, num_samples)
         normals = mesh.face_normals[idx]
 
@@ -264,8 +274,16 @@ def sample_sdf():
     # constants
     depth, full_depth = 6, 4
     sample_num = 4    # number of samples in each octree node 也就是文中说的在每个八叉树的节点，采4个点并计算对应的sdf值。
-    grid = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1],
-                                    [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1]])
+    grid = np.array([
+        [0, 0, 0], 
+        [0, 0, 1], 
+        [0, 1, 0], 
+        [0, 1, 1],
+        [1, 0, 0], 
+        [1, 0, 1], 
+        [1, 1, 0], 
+        [1, 1, 1]
+    ])
 
     print('-> Sample SDFs from the ground truth.')
     filenames = get_filenames('all.txt')
@@ -278,13 +296,16 @@ def sample_sdf():
         if os.path.exists(filename_out): continue
 
         # load data
-        pts = np.load(filename_pts)
-        sdf = np.load(filename_sdf)
-        sdf = torch.from_numpy(sdf)
-        points = pts['points'].astype(np.float32)
-        normals = pts['normals'].astype(np.float32)
-        points = points / shape_scale    # rescale points to [-1, 1]
-
+        try:
+            pts = np.load(filename_pts)
+            sdf = np.load(filename_sdf)
+            sdf = torch.from_numpy(sdf)
+            points = pts['points'].astype(np.float32)
+            normals = pts['normals'].astype(np.float32)
+            points = points / shape_scale    # rescale points to [-1, 1]
+        except:
+            print(f"Failed to laod {filename_pts}")
+            continue
         # build octree
         points = ocnn.octree.Points(torch.from_numpy(points),torch.from_numpy(normals))
         octree = ocnn.octree.Octree(depth = depth, full_depth = full_depth)
@@ -293,39 +314,42 @@ def sample_sdf():
         # sample points and grads according to the xyz
         xyzs, grads, sdfs = [], [], []
         for d in range(full_depth, depth + 1):
-            xyzb = octree.xyzb(d)
-            x,y,z,b = xyzb
-            xyz = torch.stack((x,y,z),dim=1).float()
+            try:
+                xyzb = octree.xyzb(d)
+                x,y,z,b = xyzb
+                xyz = torch.stack((x,y,z),dim=1).float()
 
-            # sample k points in each octree node
-            xyz = xyz.unsqueeze(1) + torch.rand(xyz.shape[0], sample_num, 3)
-            xyz = xyz.view(-1, 3)                                    # (N, 3)
-            xyz = xyz * (size / 2 ** d)                        # normalize to [0, 2^sdf_depth] 相当于将坐标放大到[0,128]，128是sdf采样的分辨率
-            xyz = xyz[(xyz < 127).all(dim=1)]            # remove out-of-bound points
-            xyzs.append(xyz)
+                # sample k points in each octree node
+                xyz = xyz.unsqueeze(1) + torch.rand(xyz.shape[0], sample_num, 3)
+                xyz = xyz.view(-1, 3)                                    # (N, 3)
+                xyz = xyz * (size / 2 ** d)                        # normalize to [0, 2^sdf_depth] 相当于将坐标放大到[0,128]，128是sdf采样的分辨率
+                xyz = xyz[(xyz < 127).all(dim=1)]            # remove out-of-bound points
+                xyzs.append(xyz)
 
-            # interpolate the sdf values
-            xyzi = torch.floor(xyz)                                # the integer part (N, 3)
-            corners = xyzi.unsqueeze(1) + grid         # (N, 8, 3)
-            coordsf = xyz.unsqueeze(1) - corners     # (N, 8, 3), in [-1.0, 1.0]
-            weights = (1 - coordsf.abs()).prod(dim=-1)    # (N, 8, 1)
-            corners = corners.long().view(-1, 3)
-            x, y, z = corners[:, 0], corners[:, 1], corners[:, 2]
-            s = sdf[x, y, z].view(-1, 8)
-            sw = torch.sum(s * weights, dim=1)
-            sdfs.append(sw)
+                # interpolate the sdf values
+                xyzi = torch.floor(xyz)                                # the integer part (N, 3)
+                corners = xyzi.unsqueeze(1) + grid         # (N, 8, 3)
+                coordsf = xyz.unsqueeze(1) - corners     # (N, 8, 3), in [-1.0, 1.0]
+                weights = (1 - coordsf.abs()).prod(dim=-1)    # (N, 8, 1)
+                corners = corners.long().view(-1, 3)
+                x, y, z = corners[:, 0], corners[:, 1], corners[:, 2]
+                s = sdf[x, y, z].view(-1, 8)
+                sw = torch.sum(s * weights, dim=1)
+                sdfs.append(sw)
 
-            # calc the gradient
-            gx = s[:, 4] - s[:, 0] + s[:, 5] - s[:, 1] + \
-                     s[:, 6] - s[:, 2] + s[:, 7] - s[:, 3]    # noqa
-            gy = s[:, 2] - s[:, 0] + s[:, 3] - s[:, 1] + \
-                     s[:, 6] - s[:, 4] + s[:, 7] - s[:, 5]    # noqa
-            gz = s[:, 1] - s[:, 0] + s[:, 3] - s[:, 2] + \
-                     s[:, 5] - s[:, 4] + s[:, 7] - s[:, 6]    # noqa
-            grad = torch.stack([gx, gy, gz], dim=-1)
-            norm = torch.sqrt(torch.sum(grad ** 2, dim=-1, keepdims=True))
-            grad = grad / (norm + 1.0e-8)
-            grads.append(grad)
+                # calc the gradient
+                gx = s[:, 4] - s[:, 0] + s[:, 5] - s[:, 1] + \
+                        s[:, 6] - s[:, 2] + s[:, 7] - s[:, 3]    # noqa
+                gy = s[:, 2] - s[:, 0] + s[:, 3] - s[:, 1] + \
+                        s[:, 6] - s[:, 4] + s[:, 7] - s[:, 5]    # noqa
+                gz = s[:, 1] - s[:, 0] + s[:, 3] - s[:, 2] + \
+                        s[:, 5] - s[:, 4] + s[:, 7] - s[:, 6]    # noqa
+                grad = torch.stack([gx, gy, gz], dim=-1)
+                norm = torch.sqrt(torch.sum(grad ** 2, dim=-1, keepdims=True))
+                grad = grad / (norm + 1.0e-8)
+                grads.append(grad)
+            except:
+                continue
 
         # concat the results
         xyzs = torch.cat(xyzs, dim=0).numpy()

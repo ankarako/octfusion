@@ -1,3 +1,8 @@
+# ankarako
+.venv
+.conf
+data
+
 # extensions
 *.pyc
 *.tar.gz

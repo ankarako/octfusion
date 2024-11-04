@@ -13,4 +13,4 @@ if __name__ == "__main__":
 
     # instantiate trainer
     trainer = get_trainer(config.key, **config.kwargs)
-    trainer.run()
+    trainer.train()

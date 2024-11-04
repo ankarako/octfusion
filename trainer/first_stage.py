@@ -1,6 +1,5 @@
 from typing import Dict, Any, List
 from trainer.registry import register_trainer
-
 from datasets.registry import get_dataset
 from datasets.sampler import InfSampler
 
@@ -8,21 +7,27 @@ import torch
 from torch.utils.data import DataLoader
 
 from models.networks.dualoctree_networks.graph_vae import GraphVAE
-from models.networks.dualoctree_networks.loss import geometry_loss
+from models.networks.diffusion_networks.graph_unet_lr import UNet3DModel
+from models.networks.diffusion_networks.ldm_diffusion_util import (
+    beta_linear_log_snr, log_snr_to_alpha_sigma, right_pad_dims_to
+)
+
 import ocnn
 from ocnn.dataset import CollateBatch
 
-import utils.state
+import utils
 import utils.log as log
-from utils.util_dualoctree import calc_sdf
-from utils.mesh import mcubes
+from utils.util_dualoctree import octree2split_small
+
+
 from tqdm import tqdm
 import copy
 import os
-import trimesh        
+import trimesh
+
 
 @register_trainer
-class VAETrainer:
+class FirstStageTrainer:
     def __init__(
         self,
         exp_name: str,
@@ -36,22 +41,21 @@ class VAETrainer:
         log_iters: int,
         trainset_conf: Dict[str, Any],
         trainloader_kwargs: Dict[str, Any],
-        model_kwargs: Dict[str, Any],
-        optim_kwargs: Dict[str, Any],
-        w_kl: float=0.1,
-        sdf_res: int=256
+        vae_kwargs: Dict[str, Any],
+        vae_chkp_filepath: str,
+        unet_kwargs: Dict[str, Any],
+        optim_kwargs: Dict[str, Any]
     ):
         """
-        Instantiate a VAETrainer object.
+        Instantiate a FirstStageTrainer object
         """
         # training state
         self.exp_name = exp_name
         self.nepochs = nepochs
-        self.sdf_res = sdf_res
 
         utils.state.seed(seed)
         self.device = utils.state.get_device(device)
-        
+
         # training dataset
         self.trainset_conf = trainset_conf
         self.trainloader_kwargs = trainloader_kwargs
@@ -63,81 +67,51 @@ class VAETrainer:
         self.train_iter = iter(self.trainloader)
 
         # instantiate vae
-        self.model_kwargs = model_kwargs
-        self.autoencoder = GraphVAE(**model_kwargs).to(self.device)
-        
-        # instatiate optim
-        self.optim = torch.optim.AdamW([p for p in self.autoencoder.parameters() if p.requires_grad == True], **optim_kwargs)
+        if not os.path.exists(vae_chkp_filepath):
+            log.ERROR(f"You need to specified GraphVAE's checkpoint")
+        self.vae_kwargs = vae_kwargs
+        self.autoencoder = GraphVAE(**vae_kwargs).to(self.device)
+        vae_dict = torch.load(vae_chkp_filepath)
+        self.autoencoder.load_state_dict(vae_dict['model'])
 
-        # I really don't like doing this stuff, but it will do for now
-        def poly(epoch: int, lr_power: float=0.9):
-            return (1 - epoch / self.nepochs) ** lr_power
-        self.sched = torch.optim.lr_scheduler.LambdaLR(self.optim, poly)
+        # instantiate diffusion model
+        self.unet_kwargs = unet_kwargs
+        self.unet = UNet3DModel(**unet_kwargs).to(self.device)
+
+        # instantiate optim
+        self.optim = torch.optim.AdamW([p for p in self.unet.parameters() if p.requires_grad == True], **optim_kwargs)
 
         # more training state
         self.epoch_len = len(self.trainloader)
         self.total_iters = self.nepochs * self.epoch_len
         self.iter_range = range(self.total_iters)
         self.curr_iter = -1
-        self.curr_epoch = -1
+        self.curr_iter = -1
 
-        # loss weights
-        self.w_kl = w_kl
-
-        # checkpoint state
+        # chechpoint state
         self.chkp_dir = chkp_dir
         self.chkp_iters = chkp_iters
         if not os.path.exists(self.chkp_dir):
             os.mkdir(chkp_dir)
-        
+
         # load from checkpoint if specified
         if chkp_filepath is not None and os.path.exists(chkp_filepath):
             log.INFO(f"Loading checkpoint from: {chkp_filepath}")
             self.load_chkp(chkp_filepath)
-        
+
         # logging state
         self.log_dir = log_dir
         self.log_iters = log_iters
-    
-    def infer(self, data: Dict[str, Any]) -> None:
-        """
-        Perform one inference step and save the output
-        """
-        autoencoder_out = self.autoencoder(
-            data['octree'], data['octree_gt'], data['pos']
-        )
-        bbmin, bbmax = -0.9, 0.9
-        sdf_batched = calc_sdf(
-            autoencoder_out['neural_mpu'], self.trainloader.batch_size, bbmin=bbmin, bbmax=bbmax
-        )
 
-        bsize = sdf_batched.shape[0]
-        for i in range(bsize):
-            sdf = sdf_batched[i].cpu().numpy()
-            v_pos, t_pos_idx = mcubes(sdf, 0.0)
-            if v_pos.size == 0 or t_pos_idx.size == 0:
-                log.WARN(f"Marching cubes returned empty mesh (iter: {self.curr_iter}, batch: {i})")
-                continue
-            v_pos = v_pos * ((bbmax - bbmin) / self.sdf_res) + bbmin
-            mesh = trimesh.Trimesh(v_pos, t_pos_idx)
-            filename = f"infer-{self.exp_name}-iter{self.curr_iter}-b{i}.obj"
-            filepath = os.path.join(self.log_dir, filename)
-            mesh.export(filepath)
     
-    def get_lr(self):
-        lr = 0.0
-        for param_group in self.optim.param_groups:
-            lr = param_group['lr']
-            break
-        return lr
-
     def train(self):
         """
-        Run the trainer
+        Start training
         """
         log.INFO(f"Running: {repr(self)}")
         loop = tqdm(self.iter_range, total=len(self.iter_range), ncols=100)
-        self.autoencoder.train()
+        self.autoencoder.eval()
+        self.unet.train()
         for iter in loop:
             # handle training state
             self.curr_epoch = iter // self.epoch_len
@@ -148,79 +122,71 @@ class VAETrainer:
             data = next(self.train_iter)
 
             # process input
-            # create octrees of each set of points
+            # create octrees for each set of points
             octrees = []
             for pts in data['points']:
                 oc = ocnn.octree.Octree(
-                    depth=self.autoencoder.depth_out, 
+                    depth=self.autoencoder.depth_out,
                     full_depth=self.autoencoder.full_depth
                 )
                 oc.build_octree(pts)
                 octrees += [oc]
             octree = ocnn.octree.merge_octrees(octrees)
             octree.construct_all_neigh()
-            octree_gt = copy.deepcopy(octree)
-            data['octree'] = octree
-            data['octree_gt'] = octree_gt
-            data['pos'].requires_grad = True
+            data['octree_in'] = octree
+            data['split_small'] = octree2split_small(data['octree_in'], self.autoencoder.full_depth)
 
             # perform a forward step
-            autoencoder_out = self.autoencoder(
-                data['octree'], data['octree_gt'], data['pos']
+            df_lr_loss = torch.tensor(0.0, device=self.device)
+            batch_id = torch.arange(0, self.trainloader.batch_size, device=self.device, dtype=torch.long)
+
+            times = torch.zeros([self.trainloader.batch_size,], device=self.device).float().uniform_(0, 1)
+            noise = torch.randn_like(data['split_small'])
+            noise_level = beta_linear_log_snr(times)
+            alpha, sigma = log_snr_to_alpha_sigma(noise_level)
+            batch_alpha = right_pad_dims_to(data['split_small'], alpha[batch_id])
+            batch_sigma = right_pad_dims_to(data['split_small'], sigma[batch_id])
+            noised_data = batch_alpha * data['split_small'] + batch_sigma * noise
+
+            output = self.unet(
+                unet_type='lr', x=noised_data, doctree=None, lr=None, timesteps=noise_level, label=None
             )
 
-            # calculate losses
-            output = geometry_loss(data, autoencoder_out, 'sdf_reg_loss', kl_weight=self.w_kl)
-            losses = [val for key, val in output.items() if 'loss' in key]
-            output['loss'] = torch.sum(torch.stack(losses))
-            output['code_max'] = autoencoder_out['code_max']
-            output['code_min'] = autoencoder_out['code_min']
-
+            # calc loss
+            df_lr_loss = torch.nn.functional.mse_loss(output, data['split_small'])
+            
             # optimize params
             self.optim.zero_grad()
-            output['loss'].backward()
+            df_lr_loss.backward()
             self.optim.step()
-            if self.curr_iter % self.epoch_len == 0 and self.curr_iter > 0:
-                self.sched.step()
+            # TODO: UPDATE EMA
 
-            loop.set_postfix({
-                'loss': output['loss'].detach().item(),
-                'lr': self.get_lr()
-            })
-            
             # log
             if (self.curr_iter % self.log_iters == 0) and (self.curr_iter > 0):
                 loop.set_description_str(f"e: {self.curr_epoch} | infering")
-                self.autoencoder.eval()
-                self.infer(data)
-                self.autoencoder.train()
             
-
             # save checkpoint
             if (self.curr_iter % self.chkp_iters == 0) and (self.curr_iter > 0):
                 loop.set_description_str(f"e: {self.curr_epoch} | saving checkpoint")
                 self.save_chkp()
         log.INFO("Training terminated.")
-        log.INFO("Saving checkpoint")
+        log.INFO("Saving checkpoint...")
         self.save_chkp()
     
-    def __repr__(self) -> str:
-        """
-        Get a string representation of the trainer's state
-
-        :return A string containing the trainer's state.
-        """
-        _repr = f"{VAETrainer.__name__}(\n"
-        _repr += f"\texp_name={self.exp_name},\n"
-        _repr += f"\tdevice={self.device},\n"
+    def __repr__(self):
+        _repr = f"{FirstStageTrainer.__name__}(\n"
+        _repr += f"\texp_name={self.exp_name}\n"
+        _repr += f"\tdevice={self.device}\n"
         _repr += f"\tnepochs={self.nepochs}\n"
         _repr += f"\ttrainset={self.trainset_conf},\n"
         _repr += f"\ttrainloader={self.trainloader_kwargs},\n"
-        _repr += f"\tmodel=GraphVAE,\n"
-        _repr += f"\tmodel_kwargs={self.model_kwargs},\n"
-        _repr += f")"
+        _repr += f"\tvae=GraphVAE,\n"
+        _repr += f"\tvae_kwargs={self.vae_kwargs}"
+        _repr += f"\tunet=UNet3D,\n"
+        _repr += f"\tunet_kwargs={self.unet_kwargs},\n"
+        _repr = ")"
         return _repr
-
+    
     def save_chkp(self) -> None:
         """
         Save a checkpoint
@@ -228,22 +194,26 @@ class VAETrainer:
         filename = f"{self.exp_name}_iter{self.curr_iter}.ckpt"
         filepath = os.path.join(self.chkp_dir, filename)
         state_dict = {
-            'model': self.autoencoder.state_dict(),
+            'df': self,
+            'vae': self.autoencoder.state_dict(),
             'optim': self.optim.state_dict(),
             'epoch': self.curr_epoch,
             'iter': self.curr_iter
         }
         torch.save(state_dict, filepath)
+
     
-    def load_chkp(self, filepath) -> None:
+    def load_chkp(self, filepath: str) -> None:
         """
-        Load a checkpoint from the specified filepath
+        Load a checkpoint from the specified filepath.
+
+        :param filepath The path of the checkpoint file to load.
         """
         state_dict = torch.load(filepath)
-        self.autoencoder.load_state_dict(state_dict['model'])
+        self.autoencoder.load_state_dict(state_dict['vae'])
+        self.unet.load_state_dict(state_dict['df'])
         self.optim.load_state_dict(state_dict['optim'])
         self.curr_epoch = state_dict['epoch']
         self.curr_iter = state_dict['iter']
         self.total_iters = self.total_iters - self.curr_iter
         self.iter_range = range(self.curr_iter, self.total_iters)
-        

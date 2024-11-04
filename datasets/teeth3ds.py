@@ -11,7 +11,23 @@ import utils.log as log
 from ocnn.octree.points import Points
 from ocnn.dataset import CollateBatch
 
-@register_dataset
+
+def collate_fn(data):
+    octree_collate_fn = CollateBatch(merge_points=False)
+    output = octree_collate_fn(data)
+    if 'pos' in output:
+        batch_idx = torch.cat([
+            torch.ones([pos.size(0), 1], device=pos.device) * i for i, pos in enumerate(output['pos'])
+        ], dim=0)
+        pos = torch.cat(output['pos'], dim=0)
+        output['pos'] = torch.cat([pos, batch_idx], dim=1)
+
+    for key in ['grad', 'sdf']:
+        if key in output:
+            output[key] = torch.cat(output[key], dim=0)
+    return output
+
+@register_dataset(collate_fn)
 class Teeth3DSDataset(Dataset):
     k_pcl_suffix = '_pcl.npz'
     k_sdf_suffix = '_sdf.npz'

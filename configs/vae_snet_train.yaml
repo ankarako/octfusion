@@ -67,7 +67,7 @@ data:
         split_label: True
 
         # no data augmentation
-        disable: False
+        disable: True
         distort: False
 
         # data loading

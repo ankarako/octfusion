@@ -19,6 +19,7 @@ def config_dataloader(opt):
 
 	train_loader = get_dataloader(opt,flags_train, drop_last = False)
 
+	test_loader = None
 	if not flags_test.disable:
 		test_loader = get_dataloader(opt,flags_test, drop_last = False)
 

@@ -62,7 +62,8 @@ class OctFusionModel(BaseModel):
         assert opt.vq_cfg is not None
 
         # init vae
-        vq_conf = OmegaConf.load(opt.vq_cfg)
+        # vq_conf = OmegaConf.load(opt.vq_cfg)
+        vq_conf = opt.vq_cfg
 
         self.vq_conf = vq_conf
         self.solver = self.vq_conf.solver

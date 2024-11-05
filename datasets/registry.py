@@ -4,10 +4,12 @@ k_dataset_registry = { }
 
 import utils.log as log
 
-def register_dataset(collate_fn):
+def register_dataset(collate_fn=None):
     """
     Decorator for registering dataset
-    classes in the registry
+    classes in the registry and their collate functions.
+
+    :param collate_fn The collate function for this dataset
     """
     def wrapper(cls):
         k_dataset_registry[cls.__name__] = (cls, collate_fn)

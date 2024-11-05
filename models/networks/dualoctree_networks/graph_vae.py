@@ -66,6 +66,7 @@ class GraphVAE(torch.nn.Module):
         self.resblk_type = resblk_type
         self.bottleneck = bottleneck
         self.resblk_num = resblk_num
+        self.embed_dim = embed_dim
         self.neural_mpu = mpu.NeuralMPU(self.full_depth, self.depth_stop, self.depth_out)
         self._setup_channels_and_resblks()
         n_edge_type, avg_degree = 7, 7

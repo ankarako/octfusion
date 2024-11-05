@@ -19,6 +19,7 @@ from utils.mesh import mcubes
 from tqdm import tqdm
 import copy
 import os
+from datetime import datetime
 import trimesh        
 
 @register_trainer
@@ -26,13 +27,12 @@ class VAETrainer:
     def __init__(
         self,
         exp_name: str,
+        output_dir: str,
         seed: int,
         device: List[int],
         nepochs: int,
-        chkp_dir: str,
         chkp_iters: int,
         chkp_filepath: str,
-        log_dir: str,
         log_iters: int,
         trainset_conf: Dict[str, Any],
         trainloader_kwargs: Dict[str, Any],
@@ -49,6 +49,17 @@ class VAETrainer:
         self.nepochs = nepochs
         self.sdf_res = sdf_res
 
+        # create output directory
+        if not os.path.exists(output_dir):
+            os.mkdir(output_dir)
+        
+        now = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
+        experiment_folder = exp_name + f"-{now}"
+        self.experiment_dir = os.path.join(output_dir, experiment_folder)
+        if not os.path.exists(self.experiment_dir):
+            os.mkdir(self.experiment_dir)
+
+        # more training state
         utils.state.seed(seed)
         self.device = utils.state.get_device(device)
         
@@ -66,7 +77,7 @@ class VAETrainer:
         self.model_kwargs = model_kwargs
         self.autoencoder = GraphVAE(**model_kwargs).to(self.device)
         
-        # instatiate optim
+        # instatiate optimizer
         self.optim = torch.optim.AdamW([p for p in self.autoencoder.parameters() if p.requires_grad == True], **optim_kwargs)
 
         # I really don't like doing this stuff, but it will do for now
@@ -85,10 +96,10 @@ class VAETrainer:
         self.w_kl = w_kl
 
         # checkpoint state
-        self.chkp_dir = chkp_dir
+        self.chkp_dir = os.path.join(self.experiment_dir, 'chkp')
         self.chkp_iters = chkp_iters
         if not os.path.exists(self.chkp_dir):
-            os.mkdir(chkp_dir)
+            os.mkdir(self.chkp_dir)
         
         # load from checkpoint if specified
         if chkp_filepath is not None and os.path.exists(chkp_filepath):
@@ -96,7 +107,6 @@ class VAETrainer:
             self.load_chkp(chkp_filepath)
         
         # logging state
-        self.log_dir = log_dir
         self.log_iters = log_iters
     
     def infer(self, data: Dict[str, Any]) -> None:
@@ -121,10 +131,17 @@ class VAETrainer:
             v_pos = v_pos * ((bbmax - bbmin) / self.sdf_res) + bbmin
             mesh = trimesh.Trimesh(v_pos, t_pos_idx)
             filename = f"infer-{self.exp_name}-iter{self.curr_iter}-b{i}.obj"
-            filepath = os.path.join(self.log_dir, filename)
+            filepath = os.path.join(self.experiment_dir, filename)
             mesh.export(filepath)
     
     def get_lr(self):
+        """
+        Get the current learning rate from the optimizer.
+        This will work for our case as all the optimized 
+        parameters are trained under the same learning rate.
+
+        :return The optimizer's current learning rate.
+        """
         lr = 0.0
         for param_group in self.optim.param_groups:
             lr = param_group['lr']
@@ -146,7 +163,6 @@ class VAETrainer:
 
             # load next batch
             data = next(self.train_iter)
-
             # process input
             # create octrees of each set of points
             octrees = []
@@ -163,11 +179,10 @@ class VAETrainer:
             data['octree'] = octree
             data['octree_gt'] = octree_gt
             data['pos'].requires_grad = True
+            data['pos'] = data['pos']
 
             # perform a forward step
-            autoencoder_out = self.autoencoder(
-                data['octree'], data['octree_gt'], data['pos']
-            )
+            autoencoder_out = self.autoencoder(data['octree'], data['octree_gt'], data['pos'])
 
             # calculate losses
             output = geometry_loss(data, autoencoder_out, 'sdf_reg_loss', kl_weight=self.w_kl)
@@ -223,9 +238,9 @@ class VAETrainer:
 
     def save_chkp(self) -> None:
         """
-        Save a checkpoint
+        Save a checkpoint of the current training state.
         """
-        filename = f"{self.exp_name}_iter{self.curr_iter}.ckpt"
+        filename = f"{self.exp_name}-iter{self.curr_iter}.ckpt"
         filepath = os.path.join(self.chkp_dir, filename)
         state_dict = {
             'model': self.autoencoder.state_dict(),
@@ -237,7 +252,9 @@ class VAETrainer:
     
     def load_chkp(self, filepath) -> None:
         """
-        Load a checkpoint from the specified filepath
+        Load a checkpoint from the specified filepath.
+
+        :param filepath The path to the checkpoint file to load.
         """
         state_dict = torch.load(filepath)
         self.autoencoder.load_state_dict(state_dict['model'])

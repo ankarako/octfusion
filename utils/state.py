@@ -1,5 +1,5 @@
 from typing import List
-
+import os
 import torch
 import torch.multiprocessing as mp
 import numpy as np
@@ -14,10 +14,14 @@ def seed(seed: int) -> None:
     :param seed The seed value to set
     """
     random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = True
 
 
 def set_state(cudnn_enabled: bool=True, cudnn_benchmark: bool=True, allow_tf32: bool=True, cudnn_allow_tf32: bool=True, spawn: bool=True) -> None:

@@ -43,6 +43,22 @@ class VAETrainer:
     ):
         """
         Instantiate a VAETrainer object.
+
+        :param exp_name The experiment's name
+        :param output_dir The directory to save checkpoints, and intermediate meshes
+            during training.
+        :param seed A global seed for reproducibility.
+        :param device A list of integers indicating the GPU ids to train on (only single GPU supported :P).
+        :param nepochs The number of training epochs.
+        :param chkp_iters Checkpoint saving interval in iterations.
+        :param chkp_filepath A path to a checkpoint file for resuming training.
+        :param log_iters Logging interval in iterations (basically intermediate output saving).
+        :param trainset_conf A dictionary holding the configuration for the dataset to load.
+        :param trainloader_kwargs A dictionary holding the training DataLoader's keyword arguments.
+        :param model_kwargs A dictionary holding the GraphVAE's keyword arguments.
+        :param optim_kwargs A dictionary holding the AdamW optimizer's keyword arguments.
+        :param w_kl KL divergence weight for loss calculation.
+        :param sdf_res The sdf grid resolution (used only for normalizing the output meshes.)
         """
         # training state
         self.exp_name = exp_name
@@ -109,12 +125,12 @@ class VAETrainer:
         # logging state
         self.log_iters = log_iters
     
-    def infer(self, data: Dict[str, Any]) -> None:
+    def infer(self, batch: Dict[str, Any]) -> None:
         """
         Perform one inference step and save the output
         """
         autoencoder_out = self.autoencoder(
-            data['octree'], data['octree_gt'], data['pos']
+            batch['octree'], batch['octree_gt'], batch['pos']
         )
         bbmin, bbmax = -0.9, 0.9
         sdf_batched = calc_sdf(
@@ -204,20 +220,25 @@ class VAETrainer:
             })
             
             # log
-            if (self.curr_iter % self.log_iters == 0) and (self.curr_iter > 0):
-                loop.set_description_str(f"e: {self.curr_epoch} | infering")
+            if (self.curr_iter % self.log_iters == 0):
+                # want to save iteration 0 and use it as
+                # a sanity check for exporting
+                loop.set_description_str(f"e: {self.curr_epoch} | saving output")
                 self.autoencoder.eval()
                 self.infer(data)
                 self.autoencoder.train()
             
 
             # save checkpoint
-            if (self.curr_iter % self.chkp_iters == 0) and (self.curr_iter > 0):
+            if (self.curr_iter % self.chkp_iters == 0):
+                # want to save iteration 0 and use it as 
+                # sanity check for saving checkpoints
                 loop.set_description_str(f"e: {self.curr_epoch} | saving checkpoint")
                 self.save_chkp()
         log.INFO("Training terminated.")
-        log.INFO("Saving checkpoint")
-        self.save_chkp()
+        log.INFO("Saving checkpoint...")
+        chkp_fpath = self.save_chkp()
+        log.INFO(f"Checkpoint saved at: {chkp_fpath}")
     
     def __repr__(self) -> str:
         """
@@ -239,6 +260,8 @@ class VAETrainer:
     def save_chkp(self) -> None:
         """
         Save a checkpoint of the current training state.
+
+        :return The filepath of the saved checkpoint
         """
         filename = f"{self.exp_name}-iter{self.curr_iter}.ckpt"
         filepath = os.path.join(self.chkp_dir, filename)
@@ -249,6 +272,7 @@ class VAETrainer:
             'iter': self.curr_iter
         }
         torch.save(state_dict, filepath)
+        return filepath
     
     def load_chkp(self, filepath) -> None:
         """

@@ -275,4 +275,3 @@ if __name__ == "__main__":
         out_filepath_sdf_gt = sample_gt_sdf(
             out_filepath_sdf, out_filepath_pts, src_id, output_shape_dir, k_sdf_res, k_debug
         )
-        loop.update(1)

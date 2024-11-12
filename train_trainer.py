@@ -2,6 +2,7 @@ import argparse
 import utils.conf as conf
 
 from trainer.registry import get_trainer
+import utils
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Train OctFusion via trainers")
@@ -13,4 +14,10 @@ if __name__ == "__main__":
 
     # instantiate trainer
     trainer = get_trainer(config.key, **config.kwargs)
-    trainer.train()
+    try:
+        trainer.train()
+    except KeyboardInterrupt:
+        utils.log.WARN("Training interrupted.")
+        utils.log.INFO("Saving checkpoint...")
+        fpath = trainer.save_chkp()
+        utils.log.INFO(f"Checkpoint saved at: {fpath}")

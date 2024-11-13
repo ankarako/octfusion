@@ -5,6 +5,7 @@ configs
 experiments
 data
 experiments
+outputs
 
 # extensions
 *.pyc

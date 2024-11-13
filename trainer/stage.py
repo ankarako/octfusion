@@ -104,7 +104,7 @@ class StageTrainer:
 
         # instantiate vae
         if not os.path.exists(vae_chkp_filepath):
-            log.ERROR(f"You need to specified GraphVAE's checkpoint")
+            log.ERROR(f"You need to specify GraphVAE's checkpoint")
         self.vae_kwargs = vae_kwargs
         self.autoencoder = GraphVAE(**vae_kwargs).to(self.device)
         vae_dict = torch.load(vae_chkp_filepath)

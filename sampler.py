@@ -119,7 +119,6 @@ def sample(
     df_ema.eval()
 
     shape = [batch_size, *z_shape]
-    utils.state.seed(seed)
     split_small = sample_loop(
         batch_size=batch_size,
         shape=shape,
@@ -142,8 +141,6 @@ def sample(
     doctree_small.post_processing_for_docnn()
     doctree_small_num = doctree_small.total_num
 
-    # seed everything
-    utils.state.seed(seed)
     samples = sample_loop(
         batch_size=batch_size,
         doctree_lr=doctree_small,

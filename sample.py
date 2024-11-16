@@ -98,7 +98,7 @@ if __name__ == "__main__":
     sampling_state.df.eval()
     sampling_state.df_ema.eval()
     with torch.no_grad():
-        sampling_loop = tqdm(range(args.nsamples), desc="Sampling")
+        sampling_loop = tqdm(range(args.nsamples), desc="Sampling", ncols=100)
         for sample_id in sampling_loop:
             out_filename = f"octfusion-sample-{sample_id}.obj"
             out_filepath = os.path.join(output_dir, out_filename)

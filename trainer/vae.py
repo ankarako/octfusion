@@ -285,6 +285,6 @@ class VAETrainer:
         self.optim.load_state_dict(state_dict['optim'])
         self.curr_epoch = state_dict['epoch']
         self.curr_iter = state_dict['iter']
-        self.total_iters = self.total_iters - self.curr_iter
+        # self.total_iters = self.total_iters - self.curr_iter
         self.iter_range = range(self.curr_iter, self.total_iters)
         
